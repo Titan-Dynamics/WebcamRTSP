@@ -178,6 +178,12 @@ class StreamingApp(ttk.Frame):
 
     # ---------- Helpers ----------
     def _detect_ffmpeg(self) -> str | None:
+        # When running as PyInstaller bundle, check _MEIPASS first
+        if getattr(sys, 'frozen', False):
+            bundle_dir = sys._MEIPASS
+            bundled = os.path.join(bundle_dir, "ffmpeg.exe")
+            if os.path.isfile(bundled):
+                return bundled
         # Prefer executable next to script, then CWD, then PATH
         script_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
         cwd = os.getcwd()
@@ -193,6 +199,12 @@ class StreamingApp(ttk.Frame):
         return shutil.which("ffmpeg") or shutil.which("ffmpeg.exe")
 
     def _detect_mediamtx(self) -> str | None:
+        # When running as PyInstaller bundle, check _MEIPASS first
+        if getattr(sys, 'frozen', False):
+            bundle_dir = sys._MEIPASS
+            bundled = os.path.join(bundle_dir, "mediamtx.exe")
+            if os.path.isfile(bundled):
+                return bundled
         # Prefer executable next to script, then CWD, then PATH
         script_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
         cwd = os.getcwd()
@@ -287,8 +299,8 @@ class StreamingApp(ttk.Frame):
             w = self.master.winfo_reqwidth()
             h = self.master.winfo_reqheight()
             # Apply exact requested geometry and prevent resizing
-            self.master.geometry(f"{max(1,w)}x{max(1,h)}")
-            self.master.minsize(max(1,w), max(1,h))
+            self.master.geometry(f"{max(1, w)}x{max(1, h)}")
+            self.master.minsize(max(1, w), max(1, h))
             self.master.resizable(False, False)
         except Exception:
             pass
@@ -335,6 +347,7 @@ class StreamingApp(ttk.Frame):
                 return f'"{a}"' if (" " in a or "\t" in a or "\"" in a) else a
             else:
                 return shlex.quote(a)
+
         return " ".join(q(c) for c in cmd)
 
     # ---------- Device enumeration ----------
@@ -499,11 +512,13 @@ class StreamingApp(ttk.Frame):
             return
         rc = p.wait()
         self._log(f"ffmpeg exited with code {rc}")
+
         # Reset UI when process ends
         def _reset_ui():
             # Clear process reference so user can start again
             self.proc = None
             self._set_running_state(False)
+
         self.master.after(0, _reset_ui)
         if rc != 0 and not self.stop_event.is_set():
             # Show last lines for quick diagnosis
@@ -703,6 +718,25 @@ class StreamingApp(ttk.Frame):
     # (No FFmpeg browse UI; binary is assumed next to script)
 
     # ---------- MediaMTX management ----------
+    def _detect_mediamtx_yml(self) -> str | None:
+        # When running as PyInstaller bundle, check _MEIPASS first
+        if getattr(sys, 'frozen', False):
+            bundle_dir = sys._MEIPASS
+            bundled = os.path.join(bundle_dir, "mediamtx.yml")
+            if os.path.isfile(bundled):
+                return bundled
+        # Prefer config next to script, then CWD
+        script_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+        cwd = os.getcwd()
+        candidates = [
+            os.path.join(script_dir, "mediamtx.yml"),
+            os.path.join(cwd, "mediamtx.yml"),
+        ]
+        for p in candidates:
+            if os.path.isfile(p):
+                return p
+        return None
+
     def _ensure_mediamtx_running(self) -> bool:
         # If a process exists and is alive, good
         if self.mtx_proc and self.mtx_proc.poll() is None:
@@ -715,9 +749,16 @@ class StreamingApp(ttk.Frame):
             return False
         try:
             creationflags = CREATE_NO_WINDOW
-            self._log("Starting MediaMTX:", path)
+            # Build command with config file if available
+            cmd = [path]
+            config_path = self._detect_mediamtx_yml()
+            if config_path:
+                cmd.append(config_path)
+                self._log("Starting MediaMTX:", path, "with config:", config_path)
+            else:
+                self._log("Starting MediaMTX:", path)
             self.mtx_proc = subprocess.Popen(
-                [path],
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -769,8 +810,6 @@ class StreamingApp(ttk.Frame):
                 return True
         except Exception:
             return False
-
-    
 
     # ---------- Settings persistence ----------
     def _settings_path(self) -> str:
@@ -874,7 +913,7 @@ def _better_list_dshow_cameras(self: StreamingApp) -> list[str]:
             first = s.find('"')
             last = s.rfind('"')
             if last > first >= 0:
-                name = s[first + 1 : last]
+                name = s[first + 1: last]
                 if name and name not in devices:
                     devices.append(name)
 
@@ -898,7 +937,7 @@ def _better_list_dshow_cameras(self: StreamingApp) -> list[str]:
                 first = s.find('"')
                 last = s.rfind('"')
                 if last > first >= 0:
-                    name = s[first + 1 : last]
+                    name = s[first + 1: last]
                     if name and name not in devices:
                         devices.append(name)
 
@@ -910,13 +949,150 @@ StreamingApp.refresh_devices = _better_refresh_devices
 StreamingApp._list_dshow_cameras = _better_list_dshow_cameras
 
 
+def _set_dark_title_bar(window: tk.Tk):
+    """Enable dark title bar on Windows 10/11."""
+    try:
+        import platform
+        if platform.system() != "Windows":
+            return
+        from ctypes import windll, c_int, byref, sizeof
+
+        # For tkinter, we need to get the top-level window handle
+        # winfo_id() returns a child window, so we use GetAncestor to get the top-level
+        child_hwnd = window.winfo_id()
+        # Get the top-level window by walking up the parent chain
+        hwnd = windll.user32.GetAncestor(child_hwnd, 2)  # GA_ROOT = 2
+        if not hwnd:
+            hwnd = windll.user32.GetParent(child_hwnd)
+
+        # DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (Windows 11) or 19 (Windows 10 older builds)
+        DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+        value = c_int(1)  # 1 = dark mode, 0 = light mode
+        result = windll.dwmapi.DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            byref(value),
+            sizeof(value)
+        )
+        if result != 0:
+            # Try the older Windows 10 attribute if the newer one fails
+            DWMWA_USE_IMMERSIVE_DARK_MODE = 19
+            windll.dwmapi.DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                byref(value),
+                sizeof(value)
+            )
+    except Exception:
+        pass  # Silently fail on unsupported systems
+
+
+def _apply_dark_theme(root: tk.Tk):
+    """Apply a dark theme to the application."""
+    # Define dark colors
+    bg_dark = "#1e1e1e"
+    bg_lighter = "#2d2d2d"
+    fg_light = "#e0e0e0"
+    fg_dim = "#a0a0a0"
+    accent = "#3a8dde"
+    entry_bg = "#3c3c3c"
+
+    # Configure ttk styles - must set theme before configuring
+    style = ttk.Style()
+    style.theme_use("clam")
+
+    # Configure root window after theme is set
+    root.configure(bg=bg_dark)
+
+    # Frame
+    style.configure("TFrame", background=bg_dark)
+
+    # Label
+    style.configure("TLabel", background=bg_dark, foreground=fg_light)
+
+    # Button
+    style.configure("TButton",
+                    background=bg_lighter,
+                    foreground=fg_light,
+                    borderwidth=1,
+                    focuscolor=accent)
+    style.map("TButton",
+              background=[("active", accent), ("pressed", "#2a6db0")],
+              foreground=[("active", "#ffffff")])
+
+    # Entry
+    style.configure("TEntry",
+                    fieldbackground=entry_bg,
+                    foreground=fg_light,
+                    insertcolor=fg_light,
+                    borderwidth=1)
+
+    # Combobox
+    style.configure("TCombobox",
+                    fieldbackground=entry_bg,
+                    background=bg_lighter,
+                    foreground=fg_light,
+                    arrowcolor=fg_light,
+                    borderwidth=1)
+    style.map("TCombobox",
+              fieldbackground=[("readonly", entry_bg)],
+              selectbackground=[("readonly", accent)],
+              selectforeground=[("readonly", "#ffffff")])
+
+    # Configure the dropdown listbox colors (requires option_add)
+    root.option_add("*TCombobox*Listbox.background", entry_bg)
+    root.option_add("*TCombobox*Listbox.foreground", fg_light)
+    root.option_add("*TCombobox*Listbox.selectBackground", accent)
+    root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+
+
 def main():
     if tk is None:
         print("Tkinter not available in this Python environment.")
         sys.exit(1)
+
+    # Set AppUserModelID for proper taskbar icon on Windows
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("WebcamRTSP.Streamer")
+        except Exception:
+            pass
+
     root = tk.Tk()
+
+    # Hide window during setup to prevent visual glitches
+    root.withdraw()
+
+    # Apply dark theme
+    _apply_dark_theme(root)
+
+    # Set window icon
+    script_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+    icon_path = os.path.join(script_dir, "logo.ico")
+    if os.path.isfile(icon_path):
+        try:
+            root.iconbitmap(icon_path)
+        except Exception:
+            pass
+
     app = StreamingApp(root)
     root.protocol("WM_DELETE_WINDOW", root.destroy)
+
+    # Apply dark title bar before showing window (Windows 10/11)
+    _set_dark_title_bar(root)
+
+    # Center window on screen
+    root.update_idletasks()
+    x = (root.winfo_screenwidth() - root.winfo_width()) // 2
+    y = (root.winfo_screenheight() - root.winfo_height()) // 2
+    root.geometry(f"+{x}+{y}")
+
+    # Show window after all setup is complete
+    root.deiconify()
+    root.lift()
+    root.focus_force()
+
     root.mainloop()
 
 
